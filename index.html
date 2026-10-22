@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>店頭自動案内アプリ</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -74,7 +74,9 @@
   </div>
 
   <div id="error-msg"></div>
-  <video id="video-player" playsinline></video>
+  
+  <!-- iPad対策：playsinline, webkit-playsinline 属性を付与 -->
+  <video id="video-player" playsinline webkit-playsinline></video>
 
   <div id="start-screen">
     <h2>店頭案内システム</h2>
@@ -103,7 +105,9 @@
     videoEl = document.getElementById('webcam');
     playerEl = document.getElementById('video-player');
 
-    // ブラウザ標準の顔検出API（FaceDetector）が使えるか確認
+    // ★ iPad対策：最初のボタンタップ時に動画の無音ダミー再生をして自動再生権限（アンロック）を取得
+    playerEl.load();
+
     if ('FaceDetector' in window) {
       try {
         faceDetector = new FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
@@ -132,7 +136,6 @@
       let isPersonDetected = false;
 
       if (faceDetector) {
-        // 標準FaceDetectorでの高精度顔検出
         try {
           const faces = await faceDetector.detect(videoEl);
           isPersonDetected = faces.length > 0;
@@ -140,17 +143,15 @@
           isPersonDetected = fallbackSkinDetection();
         }
       } else {
-        // フォールバック（動体・人物領域計算）
         isPersonDetected = fallbackSkinDetection();
       }
 
       handleDetection(isPersonDetected);
     }
 
-    setTimeout(detectLoop, 150); // 150ms周期で検知処理
+    setTimeout(detectLoop, 150);
   }
 
-  // 補正済み肌色・中央領域判定（フォールバック用）
   function fallbackSkinDetection() {
     const canvas = document.createElement('canvas');
     canvas.width = 320;
@@ -167,7 +168,6 @@
       const g = data[i + 1];
       const b = data[i + 2];
 
-      // 顔・肌色の正確な判定式
       if (r > 95 && g > 40 && b > 20 && r > g && r > b && (r - g > 15) && Math.abs(r - g) > 15) {
         skinPixels++;
       }
@@ -202,7 +202,6 @@
         playRandomVideo();
       }
     } else {
-      // 人がいなくなったら即座にリセット
       detectionStartTime = null;
       hasPlayedInThisSession = false;
       
@@ -237,11 +236,17 @@
     playerEl.src = selectedVideo;
     playerEl.style.display = 'block';
     
-    playerEl.play().catch(err => {
-      showError(`動画【${selectedVideo}】の再生に失敗しました。「店番」フォルダ内にファイルがあるかご確認ください。`);
-      playerEl.style.display = 'none';
-      isPlaying = false;
-    });
+    // ★ iPad対策：明示的にロードを呼び出してからPlayを実行
+    playerEl.load();
+    const playPromise = playerEl.play();
+
+    if (playPromise !== undefined) {
+      playPromise.catch(err => {
+        showError(`動画【${selectedVideo}】の再生に失敗しました。iPadのフォルダ内にファイルがあるかご確認ください: ` + err);
+        playerEl.style.display = 'none';
+        isPlaying = false;
+      });
+    }
 
     playerEl.onended = () => {
       playerEl.style.display = 'none';
