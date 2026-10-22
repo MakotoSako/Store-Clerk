@@ -40,7 +40,7 @@
     .status-badge { font-size: 1.2rem; font-weight: bold; margin-bottom: 6px; }
     .status-badge.detecting { color: #4ade80; }
     .status-badge.searching { color: #9ca3af; }
-    .status-badge.cooldown { color: #f97316; }
+    .status-badge.waiting { color: #f97316; }
     .timer-display { font-size: 1rem; color: #facc15; font-family: monospace; }
     
     #error-msg {
@@ -91,14 +91,15 @@
     return `${num}.mp4`;
   });
 
-  const TARGET_SECONDS = 4.0; // 4秒保持で発動
+  const TARGET_SECONDS = 4.0;
 
   let videoEl, playerEl;
   let detectionStartTime = null;
   let isPlaying = false;
-  let isCoolingDown = false;
+  let requireLeaveFirst = false;
   let lastPlayedIndex = -1;
   let procCanvas, procCtx;
+  let prevFrameData = null; // 動体変化計算用
 
   async function startSystem() {
     document.getElementById('start-screen').style.display = 'none';
@@ -128,7 +129,7 @@
   }
 
   function detectLoop() {
-    if (!isPlaying && !isCoolingDown && videoEl.videoWidth > 0) {
+    if (!isPlaying && videoEl.videoWidth > 0) {
       const isPersonDetected = checkPersonPresence();
       handleDetection(isPersonDetected);
     }
@@ -136,7 +137,6 @@
     setTimeout(detectLoop, 150);
   }
 
-  // 人物判定の条件を厳密化（背景による誤検知をカット）
   function checkPersonPresence() {
     procCtx.drawImage(videoEl, 0, 0, procCanvas.width, procCanvas.height);
     const frame = procCtx.getImageData(0, 0, procCanvas.width, procCanvas.height);
@@ -148,21 +148,33 @@
       const g = data[i + 1];
       const b = data[i + 2];
 
-      // 人物の肌色判定条件を厳格化
+      // iPad用色域補正判定
       if (r > 80 && g > 45 && b > 25 && r > g && r > b && (r - g > 12) && (r - b > 20)) {
         skinPixels++;
       }
     }
 
-    // 閾値を引き上げ（誤作動防止）
-    return skinPixels > 350;
+    return skinPixels > 300;
   }
 
   function handleDetection(detected) {
-    if (isCoolingDown || isPlaying) return;
-
     const statusEl = document.getElementById('status');
     const timerEl = document.getElementById('timer');
+
+    // 再生後の離脱待ち処理
+    if (requireLeaveFirst) {
+      if (detected) {
+        statusEl.className = 'status-badge waiting';
+        statusEl.innerText = '⚪ 待機中（次の人を待っています）';
+        timerEl.innerText = '計測: -- 秒';
+        detectionStartTime = null;
+        return;
+      } else {
+        // 人がいなくなった（離脱した）のでロック解除
+        requireLeaveFirst = false;
+        detectionStartTime = null;
+      }
+    }
 
     if (detected) {
       statusEl.className = 'status-badge detecting';
@@ -179,7 +191,7 @@
         playRandomVideo();
       }
     } else {
-      // 人がいなければ確実にタイマーをクリア
+      // 人がいなければ即座にタイマー0クリア
       detectionStartTime = null;
       statusEl.className = 'status-badge searching';
       statusEl.innerText = '⚪ 待機中（人を探しています）';
@@ -217,7 +229,7 @@
 
     if (playPromise !== undefined) {
       playPromise.catch(err => {
-        showError(`動画【${selectedVideo}】の再生に失敗しました。「店番」フォルダ内にファイルがあるかご確認ください。`);
+        showError(`動画【${selectedVideo}】の再生に失敗しました。「店番」フォルダ内に「${selectedVideo}」があるかご確認ください。`);
         playerEl.style.display = 'none';
         isPlaying = false;
         detectionStartTime = null;
@@ -227,24 +239,26 @@
     playerEl.onended = () => {
       playerEl.style.display = 'none';
       isPlaying = false;
-      isCoolingDown = true;
+      
+      requireLeaveFirst = true;
       detectionStartTime = null;
 
       const statusEl = document.getElementById('status');
       const timerEl = document.getElementById('timer');
-      statusEl.className = 'status-badge cooldown';
-      statusEl.innerText = '⏳ 待機中（次を準備中...）';
+      statusEl.className = 'status-badge waiting';
+      statusEl.innerText = '⚪ 待機中（次の人を待っています）';
       timerEl.innerText = '計測: -- 秒';
 
-      // 5秒間経過後、誰もいなければ「⚪ 待機中（計測: 0.0秒）」でピタリと止まるように処理
+      // ★ 安全対策：万が一環境光などで離脱が感知できなくても6秒後に自動解除
       setTimeout(() => {
-        detectionStartTime = null;
-        isCoolingDown = false;
-
-        statusEl.className = 'status-badge searching';
-        statusEl.innerText = '⚪ 待機中（人を探しています）';
-        timerEl.innerText = `計測: 0.0 秒 / ${TARGET_SECONDS.toFixed(1)} 秒`;
-      }, 5000);
+        if (requireLeaveFirst) {
+          requireLeaveFirst = false;
+          detectionStartTime = null;
+          statusEl.className = 'status-badge searching';
+          statusEl.innerText = '⚪ 待機中（人を探しています）';
+          timerEl.innerText = `計測: 0.0 秒 / ${TARGET_SECONDS.toFixed(1)} 秒`;
+        }
+      }, 6000);
     };
   }
 
