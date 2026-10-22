@@ -97,9 +97,9 @@
   let detectionStartTime = null;
   let isPlaying = false;
   let requireLeaveFirst = false;
+  let leaveCount = 0; // iPad誤検知防止用の離脱連続カウンター
   let lastPlayedIndex = -1;
   let procCanvas, procCtx;
-  let prevFrameData = null; // 動体変化計算用
 
   async function startSystem() {
     document.getElementById('start-screen').style.display = 'none';
@@ -148,7 +148,7 @@
       const g = data[i + 1];
       const b = data[i + 2];
 
-      // iPad用色域補正判定
+      // iPad/Android共通の調整値
       if (r > 80 && g > 45 && b > 25 && r > g && r > b && (r - g > 12) && (r - b > 20)) {
         skinPixels++;
       }
@@ -161,17 +161,29 @@
     const statusEl = document.getElementById('status');
     const timerEl = document.getElementById('timer');
 
-    // 再生後の離脱待ち処理
+    // ★ 動画再生後の離脱制御（iPad対策）
     if (requireLeaveFirst) {
       if (detected) {
+        // 人がまだ映っている間は離脱カウンターをリセットし、待機を維持
+        leaveCount = 0;
         statusEl.className = 'status-badge waiting';
         statusEl.innerText = '⚪ 待機中（次の人を待っています）';
         timerEl.innerText = '計測: -- 秒';
         detectionStartTime = null;
         return;
       } else {
-        // 人がいなくなった（離脱した）のでロック解除
+        // 一瞬のノイズで解除されないよう、連続5回（約0.75秒間）完全に「誰もいない」と判定されてから解除
+        leaveCount++;
+        if (leaveCount < 5) {
+          statusEl.className = 'status-badge waiting';
+          statusEl.innerText = '⚪ 待機中（次の人を待っています）';
+          timerEl.innerText = '計測: -- 秒';
+          return;
+        }
+
+        // 確実な離脱が確認できたためフラグ解除
         requireLeaveFirst = false;
+        leaveCount = 0;
         detectionStartTime = null;
       }
     }
@@ -191,7 +203,6 @@
         playRandomVideo();
       }
     } else {
-      // 人がいなければ即座にタイマー0クリア
       detectionStartTime = null;
       statusEl.className = 'status-badge searching';
       statusEl.innerText = '⚪ 待機中（人を探しています）';
@@ -240,7 +251,9 @@
       playerEl.style.display = 'none';
       isPlaying = false;
       
+      // 再生完了時に離脱待ちフラグとカウンターをセット
       requireLeaveFirst = true;
+      leaveCount = 0;
       detectionStartTime = null;
 
       const statusEl = document.getElementById('status');
@@ -248,17 +261,6 @@
       statusEl.className = 'status-badge waiting';
       statusEl.innerText = '⚪ 待機中（次の人を待っています）';
       timerEl.innerText = '計測: -- 秒';
-
-      // ★ 安全対策：万が一環境光などで離脱が感知できなくても6秒後に自動解除
-      setTimeout(() => {
-        if (requireLeaveFirst) {
-          requireLeaveFirst = false;
-          detectionStartTime = null;
-          statusEl.className = 'status-badge searching';
-          statusEl.innerText = '⚪ 待機中（人を探しています）';
-          timerEl.innerText = `計測: 0.0 秒 / ${TARGET_SECONDS.toFixed(1)} 秒`;
-        }
-      }, 6000);
     };
   }
 
