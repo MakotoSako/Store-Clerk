@@ -40,6 +40,7 @@
     .status-badge { font-size: 1.2rem; font-weight: bold; margin-bottom: 6px; }
     .status-badge.detecting { color: #4ade80; }
     .status-badge.searching { color: #9ca3af; }
+    .status-badge.cooldown { color: #f97316; }
     .timer-display { font-size: 1rem; color: #facc15; font-family: monospace; }
     
     #error-msg {
@@ -75,7 +76,6 @@
 
   <div id="error-msg"></div>
   
-  <!-- iPad対策：playsinline, webkit-playsinline 属性を付与 -->
   <video id="video-player" playsinline webkit-playsinline></video>
 
   <div id="start-screen">
@@ -91,103 +91,80 @@
     return `${num}.mp4`;
   });
 
-  const TARGET_SECONDS = 4.0;
+  const TARGET_SECONDS = 4.0; // 4秒保持で発動
 
   let videoEl, playerEl;
   let detectionStartTime = null;
   let isPlaying = false;
-  let hasPlayedInThisSession = false;
+  let isCoolingDown = false;
   let lastPlayedIndex = -1;
-  let faceDetector = null;
+  let procCanvas, procCtx;
 
   async function startSystem() {
     document.getElementById('start-screen').style.display = 'none';
     videoEl = document.getElementById('webcam');
     playerEl = document.getElementById('video-player');
 
-    // ★ iPad対策：最初のボタンタップ時に動画の無音ダミー再生をして自動再生権限（アンロック）を取得
-    playerEl.load();
+    procCanvas = document.createElement('canvas');
+    procCanvas.width = 160;
+    procCanvas.height = 120;
+    procCtx = procCanvas.getContext('2d');
 
-    if ('FaceDetector' in window) {
-      try {
-        faceDetector = new FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
-      } catch (e) {
-        faceDetector = null;
-      }
-    }
+    playerEl.load();
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+        video: { facingMode: "user" },
         audio: false
       });
       videoEl.srcObject = stream;
-      videoEl.onloadedmetadata = () => {
-        document.getElementById('status').innerText = '⚪ 待機中（人を探しています）';
-        detectLoop();
-      };
+      await videoEl.play();
+
+      document.getElementById('status').innerText = '⚪ 待機中（人を探しています）';
+      detectLoop();
     } catch (err) {
       showError("カメラの起動に失敗しました: " + err);
     }
   }
 
-  async function detectLoop() {
-    if (!isPlaying && videoEl.readyState === 4) {
-      let isPersonDetected = false;
-
-      if (faceDetector) {
-        try {
-          const faces = await faceDetector.detect(videoEl);
-          isPersonDetected = faces.length > 0;
-        } catch (e) {
-          isPersonDetected = fallbackSkinDetection();
-        }
-      } else {
-        isPersonDetected = fallbackSkinDetection();
-      }
-
+  function detectLoop() {
+    if (!isPlaying && !isCoolingDown && videoEl.videoWidth > 0) {
+      const isPersonDetected = checkPersonPresence();
       handleDetection(isPersonDetected);
     }
 
     setTimeout(detectLoop, 150);
   }
 
-  function fallbackSkinDetection() {
-    const canvas = document.createElement('canvas');
-    canvas.width = 320;
-    canvas.height = 240;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
-    
-    const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  // 人物判定の条件を厳密化（背景による誤検知をカット）
+  function checkPersonPresence() {
+    procCtx.drawImage(videoEl, 0, 0, procCanvas.width, procCanvas.height);
+    const frame = procCtx.getImageData(0, 0, procCanvas.width, procCanvas.height);
     const data = frame.data;
     let skinPixels = 0;
 
-    for (let i = 0; i < data.length; i += 16) {
+    for (let i = 0; i < data.length; i += 8) {
       const r = data[i];
       const g = data[i + 1];
       const b = data[i + 2];
 
-      if (r > 95 && g > 40 && b > 20 && r > g && r > b && (r - g > 15) && Math.abs(r - g) > 15) {
+      // 人物の肌色判定条件を厳格化
+      if (r > 80 && g > 45 && b > 25 && r > g && r > b && (r - g > 12) && (r - b > 20)) {
         skinPixels++;
       }
     }
 
-    return skinPixels > 450;
+    // 閾値を引き上げ（誤作動防止）
+    return skinPixels > 350;
   }
 
   function handleDetection(detected) {
+    if (isCoolingDown || isPlaying) return;
+
     const statusEl = document.getElementById('status');
     const timerEl = document.getElementById('timer');
 
     if (detected) {
-      if (hasPlayedInThisSession) {
-        statusEl.className = 'status-badge searching';
-        statusEl.innerText = '⚪ 待機中（離脱待ち）';
-        timerEl.innerText = '計測: 完了';
-        return;
-      }
-
       statusEl.className = 'status-badge detecting';
       statusEl.innerText = '👤 人物を検知中';
 
@@ -202,9 +179,8 @@
         playRandomVideo();
       }
     } else {
+      // 人がいなければ確実にタイマーをクリア
       detectionStartTime = null;
-      hasPlayedInThisSession = false;
-      
       statusEl.className = 'status-badge searching';
       statusEl.innerText = '⚪ 待機中（人を探しています）';
       timerEl.innerText = `計測: 0.0 秒 / ${TARGET_SECONDS.toFixed(1)} 秒`;
@@ -236,28 +212,39 @@
     playerEl.src = selectedVideo;
     playerEl.style.display = 'block';
     
-    // ★ iPad対策：明示的にロードを呼び出してからPlayを実行
     playerEl.load();
     const playPromise = playerEl.play();
 
     if (playPromise !== undefined) {
       playPromise.catch(err => {
-        showError(`動画【${selectedVideo}】の再生に失敗しました。iPadのフォルダ内にファイルがあるかご確認ください: ` + err);
+        showError(`動画【${selectedVideo}】の再生に失敗しました。「店番」フォルダ内にファイルがあるかご確認ください。`);
         playerEl.style.display = 'none';
         isPlaying = false;
+        detectionStartTime = null;
       });
     }
 
     playerEl.onended = () => {
       playerEl.style.display = 'none';
       isPlaying = false;
-      hasPlayedInThisSession = true;
+      isCoolingDown = true;
+      detectionStartTime = null;
 
       const statusEl = document.getElementById('status');
       const timerEl = document.getElementById('timer');
-      statusEl.className = 'status-badge searching';
-      statusEl.innerText = '⚪ 待機中（人を探しています）';
-      timerEl.innerText = `計測: 0.0 秒 / ${TARGET_SECONDS.toFixed(1)} 秒`;
+      statusEl.className = 'status-badge cooldown';
+      statusEl.innerText = '⏳ 待機中（次を準備中...）';
+      timerEl.innerText = '計測: -- 秒';
+
+      // 5秒間経過後、誰もいなければ「⚪ 待機中（計測: 0.0秒）」でピタリと止まるように処理
+      setTimeout(() => {
+        detectionStartTime = null;
+        isCoolingDown = false;
+
+        statusEl.className = 'status-badge searching';
+        statusEl.innerText = '⚪ 待機中（人を探しています）';
+        timerEl.innerText = `計測: 0.0 秒 / ${TARGET_SECONDS.toFixed(1)} 秒`;
+      }, 5000);
     };
   }
 
