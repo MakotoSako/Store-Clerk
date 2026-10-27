@@ -43,6 +43,37 @@
     .status-badge.waiting { color: #f97316; }
     .timer-display { font-size: 1rem; color: #facc15; font-family: monospace; }
     
+    /* 画面中央の店主呼び出し赤ボタン */
+    #call-button-container {
+      position: absolute;
+      bottom: 12%;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 20;
+      text-align: center;
+    }
+    .call-btn {
+      background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
+      color: #fff;
+      border: 3px solid #fecaca;
+      padding: 18px 36px;
+      font-size: 1.5rem;
+      font-weight: bold;
+      border-radius: 50px;
+      cursor: pointer;
+      box-shadow: 0 10px 25px rgba(239, 68, 68, 0.5), 0 0 15px rgba(255, 255, 255, 0.3);
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      transition: transform 0.1s ease, box-shadow 0.1s ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .call-btn:active {
+      transform: scale(0.95);
+      box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+    }
+
     #error-msg {
       position: absolute; bottom: 20px; left: 20px;
       background: rgba(220, 38, 38, 0.9); color: #fff;
@@ -74,6 +105,13 @@
     <div id="timer" class="timer-display">計測: 0.0 秒 / 4.0 秒</div>
   </div>
 
+  <!-- 店主呼び出し赤ボタン -->
+  <div id="call-button-container">
+    <a href="sms:09071648938&body=呼び出しです" class="call-btn" id="call-btn">
+      🔔 店主呼び出しはこちら
+    </a>
+  </div>
+
   <div id="error-msg"></div>
   
   <video id="video-player" playsinline webkit-playsinline></video>
@@ -91,14 +129,14 @@
     return `${num}.mp4`;
   });
 
-  const TARGET_SECONDS = 4.0;       // 検知から再生までの時間（4秒）
-  const WAITING_TIMEOUT_SECONDS = 12.0; // 待機から次へ進む強制リミット（12秒）
+  const TARGET_SECONDS = 4.0;           // 検知から再生までの時間（4秒）
+  const WAITING_TIMEOUT_SECONDS = 30.0; // ★ 待機から次へ進む強制リミット（30秒に変更）
 
-  let videoEl, playerEl;
+  let videoEl, playerEl, callBtnContainer;
   let detectionStartTime = null;
-  let waitingStartTime = null;     // 待機開始時刻
+  let waitingStartTime = null;
   let isPlaying = false;
-  let requireLeaveFirst = false;   // 待機モード管理
+  let requireLeaveFirst = false;
   let lastPlayedIndex = -1;
   let procCanvas, procCtx;
 
@@ -106,6 +144,7 @@
     document.getElementById('start-screen').style.display = 'none';
     videoEl = document.getElementById('webcam');
     playerEl = document.getElementById('video-player');
+    callBtnContainer = document.getElementById('call-button-container');
 
     procCanvas = document.createElement('canvas');
     procCanvas.width = 160;
@@ -138,7 +177,6 @@
     setTimeout(detectLoop, 150);
   }
 
-  // 会場向け：感度を元に戻した人物検知（しっかり拾える設定）
   function checkPersonPresence() {
     procCtx.drawImage(videoEl, 0, 0, procCanvas.width, procCanvas.height);
     const frame = procCtx.getImageData(0, 0, procCanvas.width, procCanvas.height);
@@ -150,13 +188,11 @@
       const g = data[i + 1];
       const b = data[i + 2];
 
-      // 感度高めの肌色・人物領域判定
       if (r > 60 && g > 30 && b > 15 && r > g && r > b && (r - g > 8)) {
         skinPixels++;
       }
     }
 
-    // 閾値を下げて反応しやすく戻す
     return skinPixels > 140;
   }
 
@@ -164,11 +200,11 @@
     const statusEl = document.getElementById('status');
     const timerEl = document.getElementById('timer');
 
-    // ★ 再生後の待機フェーズ
+    // 再生後の待機フェーズ
     if (requireLeaveFirst) {
       const waitingElapsed = (Date.now() - waitingStartTime) / 1000;
 
-      // 条件A: 待機が12秒経過した場合 ➔ 強制的に次の動画を再生
+      // 30秒経過した場合は強制的に次の動画へ
       if (waitingElapsed >= WAITING_TIMEOUT_SECONDS) {
         requireLeaveFirst = false;
         waitingStartTime = null;
@@ -176,7 +212,7 @@
         return;
       }
 
-      // 条件B: 画面から人が立ち去った場合 ➔ 待機解除して通常検知モードへ復帰
+      // 画面から人が完全に離脱した場合は即時リセット
       if (!detected) {
         requireLeaveFirst = false;
         waitingStartTime = null;
@@ -187,7 +223,6 @@
         return;
       }
 
-      // まだ人が映っていて12秒以内の場合
       const remain = Math.max(0, WAITING_TIMEOUT_SECONDS - waitingElapsed);
       statusEl.className = 'status-badge waiting';
       statusEl.innerText = '⚪ 待機中（次の案内まで）';
@@ -195,7 +230,7 @@
       return;
     }
 
-    // ★ 通常モード：人物検知で4秒カウント
+    // 通常モード（4秒検知）
     if (detected) {
       statusEl.className = 'status-badge detecting';
       statusEl.innerText = '👤 人物を検知中';
@@ -211,7 +246,6 @@
         playRandomVideo();
       }
     } else {
-      // 誰もいなければタイマーリセット
       detectionStartTime = null;
       statusEl.className = 'status-badge searching';
       statusEl.innerText = '⚪ 待機中（人を探しています）';
@@ -228,6 +262,9 @@
     isPlaying = true;
     detectionStartTime = null;
     waitingStartTime = null;
+
+    // 動画再生中は呼び出しボタンを隠す（動画が見やすいように配慮）
+    if (callBtnContainer) callBtnContainer.style.display = 'none';
 
     let randomIndex;
     if (videoList.length > 1) {
@@ -254,6 +291,7 @@
         playerEl.style.display = 'none';
         isPlaying = false;
         detectionStartTime = null;
+        if (callBtnContainer) callBtnContainer.style.display = 'block';
       });
     }
 
@@ -261,7 +299,10 @@
       playerEl.style.display = 'none';
       isPlaying = false;
       
-      // 動画終了 ➔ 待機フェーズ開始（12秒タイマー起算）
+      // 動画終了時に呼び出しボタンを再表示
+      if (callBtnContainer) callBtnContainer.style.display = 'block';
+
+      // 待機フェーズ開始（30秒タイマー）
       requireLeaveFirst = true;
       waitingStartTime = Date.now();
       detectionStartTime = null;
