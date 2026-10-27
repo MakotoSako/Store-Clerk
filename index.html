@@ -42,6 +42,7 @@
     .status-badge.searching { color: #9ca3af; }
     .timer-display { font-size: 1rem; color: #facc15; font-family: monospace; }
     
+    /* 店主呼び出し赤ボタン */
     #call-button-container {
       position: absolute;
       bottom: 12%;
@@ -102,11 +103,13 @@
 <div id="container">
   <video id="webcam" autoplay playsinline muted></video>
 
+  <!-- 右上ステータス表示（待機中は非表示） -->
   <div class="overlay-ui" id="overlay-ui">
     <div id="status" class="status-badge searching">⚪ カメラ準備中...</div>
     <div id="timer" class="timer-display">計測: 0.0 秒 / 4.0 秒</div>
   </div>
 
+  <!-- 店主呼び出し赤ボタン -->
   <div id="call-button-container">
     <button class="call-btn" id="call-btn" onclick="sendNtfyAlert()">
       🔔 店主呼び出しはこちら
@@ -152,7 +155,6 @@
     callBtn = document.getElementById('call-btn');
     overlayUiEl = document.getElementById('overlay-ui');
 
-    // 負荷軽減のため処理解像度を維持
     procCanvas = document.createElement('canvas');
     procCanvas.width = 160;
     procCanvas.height = 120;
@@ -166,9 +168,7 @@
         audio: false
       });
       videoEl.srcObject = stream;
-      
-      // iPadでのawait再生ブロックを回避
-      videoEl.play().catch(e => console.log("Play log:", e));
+      await videoEl.play();
 
       document.getElementById('status').innerText = '⚪ 待機中（人を探しています）';
       detectLoop();
@@ -177,6 +177,7 @@
     }
   }
 
+  // 動的iframe/form生成による連続通知対応
   function sendNtfyAlert() {
     if (isSending) return;
     isSending = true;
@@ -236,47 +237,45 @@
   }
 
   function detectLoop() {
-    if (!isPlaying && videoEl && videoEl.videoWidth > 0) {
+    if (!isPlaying && videoEl.videoWidth > 0) {
       const isPersonDetected = checkPersonPresence();
       handleDetection(isPersonDetected);
     }
 
-    // iPadの描画ループに負荷をかけないよう200ms間隔
-    setTimeout(detectLoop, 200);
+    setTimeout(detectLoop, 150);
   }
 
-  // 軽量かつ高感度な人物判定（iPadがフリーズしない設定）
+  // ★ 安定稼働していた元の感度設定に完全復旧
   function checkPersonPresence() {
     procCtx.drawImage(videoEl, 0, 0, procCanvas.width, procCanvas.height);
     const frame = procCtx.getImageData(0, 0, procCanvas.width, procCanvas.height);
     const data = frame.data;
     let skinPixels = 0;
 
-    // 負荷を抑えるためステップは8に戻し、色条件と閾値で感度を極大化
     for (let i = 0; i < data.length; i += 8) {
       const r = data[i];
       const g = data[i + 1];
       const b = data[i + 2];
 
-      // 薄暗い場所でもしっかり拾える柔軟な条件
-      if (r > 50 && g > 25 && b > 10 && r > g && r > b && (r - g > 5)) {
+      if (r > 60 && g > 30 && b > 15 && r > g && r > b && (r - g > 8)) {
         skinPixels++;
       }
     }
 
-    // 閾値を40まで下げて、遠くにいる人や少しの映り込みでも即反応
-    return skinPixels > 40;
+    return skinPixels > 140;
   }
 
   function handleDetection(detected) {
     const statusEl = document.getElementById('status');
     const timerEl = document.getElementById('timer');
 
+    // ★ 待機フェーズ
     if (requireLeaveFirst) {
-      overlayUiEl.style.display = 'none';
+      overlayUiEl.style.display = 'none'; // 待機中案内は非表示
 
       const waitingElapsed = (Date.now() - waitingStartTime) / 1000;
 
+      // 30秒経過で次の動画を自動再生
       if (waitingElapsed >= WAITING_TIMEOUT_SECONDS) {
         requireLeaveFirst = false;
         waitingStartTime = null;
@@ -284,6 +283,7 @@
         return;
       }
 
+      // 画面から人が完全に離脱した場合は待機解除
       if (!detected) {
         requireLeaveFirst = false;
         waitingStartTime = null;
@@ -342,3 +342,52 @@
       } while (randomIndex === lastPlayedIndex);
     } else {
       randomIndex = 0;
+    }
+    
+    lastPlayedIndex = randomIndex;
+    const selectedVideo = videoList[randomIndex];
+
+    hideError();
+    playerEl.src = selectedVideo;
+    playerEl.style.display = 'block';
+    
+    playerEl.load();
+    const playPromise = playerEl.play();
+
+    if (playPromise !== undefined) {
+      playPromise.catch(err => {
+        showError(`動画【${selectedVideo}】の再生に失敗しました。「店番」フォルダ内にファイルがあるかご確認ください。`);
+        playerEl.style.display = 'none';
+        isPlaying = false;
+        detectionStartTime = null;
+        if (callBtnContainer) callBtnContainer.style.display = 'block';
+      });
+    }
+
+    playerEl.onended = () => {
+      playerEl.style.display = 'none';
+      isPlaying = false;
+      
+      if (callBtnContainer) callBtnContainer.style.display = 'block';
+
+      // 待機フェーズ開始（30秒タイマー）
+      requireLeaveFirst = true;
+      waitingStartTime = Date.now();
+      detectionStartTime = null;
+
+      if (overlayUiEl) overlayUiEl.style.display = 'none';
+    };
+  }
+
+  function showError(msg) {
+    const errEl = document.getElementById('error-msg');
+    errEl.innerText = msg;
+    errEl.style.display = 'block';
+  }
+
+  function hideError() {
+    document.getElementById('error-msg').style.display = 'none';
+  }
+</script>
+</body>
+</html>
