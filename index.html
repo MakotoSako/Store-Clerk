@@ -40,7 +40,6 @@
     .status-badge { font-size: 1.2rem; font-weight: bold; margin-bottom: 6px; }
     .status-badge.detecting { color: #4ade80; }
     .status-badge.searching { color: #9ca3af; }
-    .status-badge.waiting { color: #f97316; }
     .timer-display { font-size: 1rem; color: #facc15; font-family: monospace; }
     
     /* 店主呼び出し赤ボタン */
@@ -104,7 +103,8 @@
 <div id="container">
   <video id="webcam" autoplay playsinline muted></video>
 
-  <div class="overlay-ui">
+  <!-- 右上ステータス表示（待機中は非表示になります） -->
+  <div class="overlay-ui" id="overlay-ui">
     <div id="status" class="status-badge searching">⚪ カメラ準備中...</div>
     <div id="timer" class="timer-display">計測: 0.0 秒 / 4.0 秒</div>
   </div>
@@ -115,6 +115,15 @@
       🔔 店主呼び出しはこちら
     </button>
   </div>
+
+  <!-- iPad通信ブロック回避用の非同期インラインフォーム & 非表示iframe -->
+  <iframe name="ntfy_sink" style="display:none; width:0; height:0;"></iframe>
+  <form id="ntfy-form" method="POST" target="ntfy_sink" style="display:none;">
+    <input type="hidden" name="message" value="お客様が店頭で店主を呼び出しています！">
+    <input type="hidden" name="title" value="店頭呼び出し">
+    <input type="hidden" name="priority" value="urgent">
+    <input type="hidden" name="tags" value="bell,warning">
+  </form>
 
   <div id="error-msg"></div>
   
@@ -138,7 +147,7 @@
   const TARGET_SECONDS = 4.0;
   const WAITING_TIMEOUT_SECONDS = 30.0;
 
-  let videoEl, playerEl, callBtnContainer, callBtn;
+  let videoEl, playerEl, callBtnContainer, callBtn, overlayUiEl;
   let detectionStartTime = null;
   let waitingStartTime = null;
   let isPlaying = false;
@@ -153,6 +162,7 @@
     playerEl = document.getElementById('video-player');
     callBtnContainer = document.getElementById('call-button-container');
     callBtn = document.getElementById('call-btn');
+    overlayUiEl = document.getElementById('overlay-ui');
 
     procCanvas = document.createElement('canvas');
     procCanvas.width = 160;
@@ -176,41 +186,25 @@
     }
   }
 
-  // ★ iPadのセキュリティ・文字コード制限を回避した送信処理
-  async function sendNtfyAlert() {
+  // ★ iPadのJavaScript制約を一切受けないForm Submit送信
+  function sendNtfyAlert() {
     if (isSending) return;
     isSending = true;
 
     callBtn.innerText = "⏳ 呼び出し中...";
     callBtn.style.pointerEvents = "none";
 
-    // URLパラメータ方式で送る（CORS制限・Safariヘッダー制限を回避）
-    const msg = encodeURIComponent("お客様が店頭で店主を呼び出しています！");
-    const title = encodeURIComponent("店頭呼び出し");
-    const url = `https://ntfy.sh/${NTFY_TOPIC}/publish?message=${msg}&title=${title}&priority=urgent&tags=bell,warning`;
+    const form = document.getElementById('ntfy-form');
+    form.action = `https://ntfy.sh/${NTFY_TOPIC}`;
+    
+    // 背景のiframe宛にサブミット（Safari/WebKitでもブロックされず通信が成立）
+    form.submit();
 
-    try {
-      // mode: 'no-cors' でiPadローカルファイルの通信遮断を突破
-      await fetch(url, {
-        method: "POST",
-        mode: "no-cors"
-      });
+    // 成功表示へ移行
+    callBtn.classList.add("sent");
+    callBtn.innerText = "✅ 店主へ通知しました";
 
-      // 通信が送出できれば完了表示
-      callBtn.classList.add("sent");
-      callBtn.innerText = "✅ 店主へ通知しました";
-    } catch (e) {
-      // 万が一fetch自体が弾かれた場合のバックアップ（画像Ping手法）
-      try {
-        const ping = new Image();
-        ping.src = url;
-        callBtn.classList.add("sent");
-        callBtn.innerText = "✅ 店主へ通知しました";
-      } catch (err) {
-        callBtn.innerText = "⚠️ 送信失敗（Wi-Fi接続確認）";
-      }
-    }
-
+    // 5秒後にボタンを通常状態へ復元
     setTimeout(() => {
       callBtn.classList.remove("sent");
       callBtn.innerText = "🔔 店主呼び出しはこちら";
@@ -251,9 +245,14 @@
     const statusEl = document.getElementById('status');
     const timerEl = document.getElementById('timer');
 
+    // ★ 動画再生後の待機フェーズ
     if (requireLeaveFirst) {
+      // 待機中は右上のUI案内を非表示に固定
+      overlayUiEl.style.display = 'none';
+
       const waitingElapsed = (Date.now() - waitingStartTime) / 1000;
 
+      // 30秒経過で次の動画を自動再生
       if (waitingElapsed >= WAITING_TIMEOUT_SECONDS) {
         requireLeaveFirst = false;
         waitingStartTime = null;
@@ -261,22 +260,23 @@
         return;
       }
 
+      // 画面から人が完全に離脱した場合は待機解除して通常監視へ復帰
       if (!detected) {
         requireLeaveFirst = false;
         waitingStartTime = null;
         detectionStartTime = null;
+        overlayUiEl.style.display = 'block';
         statusEl.className = 'status-badge searching';
         statusEl.innerText = '⚪ 待機中（人を探しています）';
         timerEl.innerText = `計測: 0.0 秒 / ${TARGET_SECONDS.toFixed(1)} 秒`;
         return;
       }
 
-      const remain = Math.max(0, WAITING_TIMEOUT_SECONDS - waitingElapsed);
-      statusEl.className = 'status-badge waiting';
-      statusEl.innerText = '⚪ 待機中（次の案内まで）';
-      timerEl.innerText = `次まで: ${remain.toFixed(1)} 秒`;
       return;
     }
+
+    // ★ 通常モード（画面右上の案内を表示）
+    overlayUiEl.style.display = 'block';
 
     if (detected) {
       statusEl.className = 'status-badge detecting';
@@ -311,6 +311,7 @@
     waitingStartTime = null;
 
     if (callBtnContainer) callBtnContainer.style.display = 'none';
+    if (overlayUiEl) overlayUiEl.style.display = 'none';
 
     let randomIndex;
     if (videoList.length > 1) {
@@ -347,15 +348,13 @@
       
       if (callBtnContainer) callBtnContainer.style.display = 'block';
 
+      // 待機フェーズ開始（30秒タイマー裏側カウント）
       requireLeaveFirst = true;
       waitingStartTime = Date.now();
       detectionStartTime = null;
 
-      const statusEl = document.getElementById('status');
-      const timerEl = document.getElementById('timer');
-      statusEl.className = 'status-badge waiting';
-      statusEl.innerText = '⚪ 待機中（次の案内まで）';
-      timerEl.innerText = `次まで: ${WAITING_TIMEOUT_SECONDS.toFixed(1)} 秒`;
+      // 待機中は案内を一切出さず、すっきりした待機画面を保つ
+      if (overlayUiEl) overlayUiEl.style.display = 'none';
     };
   }
 
