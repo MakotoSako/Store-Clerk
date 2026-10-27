@@ -91,13 +91,14 @@
     return `${num}.mp4`;
   });
 
-  const TARGET_SECONDS = 4.0;
+  const TARGET_SECONDS = 4.0;       // 検知から再生までの時間（4秒）
+  const WAITING_TIMEOUT_SECONDS = 12.0; // 待機から次へ進む強制リミット（12秒）
 
   let videoEl, playerEl;
   let detectionStartTime = null;
+  let waitingStartTime = null;     // 待機開始時刻
   let isPlaying = false;
-  let requireLeaveFirst = false;
-  let leaveCount = 0; // iPad誤検知防止用の離脱連続カウンター
+  let requireLeaveFirst = false;   // 待機モード管理
   let lastPlayedIndex = -1;
   let procCanvas, procCtx;
 
@@ -137,6 +138,7 @@
     setTimeout(detectLoop, 150);
   }
 
+  // 会場向け：感度を元に戻した人物検知（しっかり拾える設定）
   function checkPersonPresence() {
     procCtx.drawImage(videoEl, 0, 0, procCanvas.width, procCanvas.height);
     const frame = procCtx.getImageData(0, 0, procCanvas.width, procCanvas.height);
@@ -148,46 +150,52 @@
       const g = data[i + 1];
       const b = data[i + 2];
 
-      // iPad/Android共通の調整値
-      if (r > 80 && g > 45 && b > 25 && r > g && r > b && (r - g > 12) && (r - b > 20)) {
+      // 感度高めの肌色・人物領域判定
+      if (r > 60 && g > 30 && b > 15 && r > g && r > b && (r - g > 8)) {
         skinPixels++;
       }
     }
 
-    return skinPixels > 300;
+    // 閾値を下げて反応しやすく戻す
+    return skinPixels > 140;
   }
 
   function handleDetection(detected) {
     const statusEl = document.getElementById('status');
     const timerEl = document.getElementById('timer');
 
-    // ★ 動画再生後の離脱制御（iPad対策）
+    // ★ 再生後の待機フェーズ
     if (requireLeaveFirst) {
-      if (detected) {
-        // 人がまだ映っている間は離脱カウンターをリセットし、待機を維持
-        leaveCount = 0;
-        statusEl.className = 'status-badge waiting';
-        statusEl.innerText = '⚪ 待機中（次の人を待っています）';
-        timerEl.innerText = '計測: -- 秒';
-        detectionStartTime = null;
-        return;
-      } else {
-        // 一瞬のノイズで解除されないよう、連続5回（約0.75秒間）完全に「誰もいない」と判定されてから解除
-        leaveCount++;
-        if (leaveCount < 5) {
-          statusEl.className = 'status-badge waiting';
-          statusEl.innerText = '⚪ 待機中（次の人を待っています）';
-          timerEl.innerText = '計測: -- 秒';
-          return;
-        }
+      const waitingElapsed = (Date.now() - waitingStartTime) / 1000;
 
-        // 確実な離脱が確認できたためフラグ解除
+      // 条件A: 待機が12秒経過した場合 ➔ 強制的に次の動画を再生
+      if (waitingElapsed >= WAITING_TIMEOUT_SECONDS) {
         requireLeaveFirst = false;
-        leaveCount = 0;
-        detectionStartTime = null;
+        waitingStartTime = null;
+        playRandomVideo();
+        return;
       }
+
+      // 条件B: 画面から人が立ち去った場合 ➔ 待機解除して通常検知モードへ復帰
+      if (!detected) {
+        requireLeaveFirst = false;
+        waitingStartTime = null;
+        detectionStartTime = null;
+        statusEl.className = 'status-badge searching';
+        statusEl.innerText = '⚪ 待機中（人を探しています）';
+        timerEl.innerText = `計測: 0.0 秒 / ${TARGET_SECONDS.toFixed(1)} 秒`;
+        return;
+      }
+
+      // まだ人が映っていて12秒以内の場合
+      const remain = Math.max(0, WAITING_TIMEOUT_SECONDS - waitingElapsed);
+      statusEl.className = 'status-badge waiting';
+      statusEl.innerText = '⚪ 待機中（次の案内まで）';
+      timerEl.innerText = `次まで: ${remain.toFixed(1)} 秒`;
+      return;
     }
 
+    // ★ 通常モード：人物検知で4秒カウント
     if (detected) {
       statusEl.className = 'status-badge detecting';
       statusEl.innerText = '👤 人物を検知中';
@@ -203,6 +211,7 @@
         playRandomVideo();
       }
     } else {
+      // 誰もいなければタイマーリセット
       detectionStartTime = null;
       statusEl.className = 'status-badge searching';
       statusEl.innerText = '⚪ 待機中（人を探しています）';
@@ -218,6 +227,7 @@
 
     isPlaying = true;
     detectionStartTime = null;
+    waitingStartTime = null;
 
     let randomIndex;
     if (videoList.length > 1) {
@@ -240,7 +250,7 @@
 
     if (playPromise !== undefined) {
       playPromise.catch(err => {
-        showError(`動画【${selectedVideo}】の再生に失敗しました。「店番」フォルダ内に「${selectedVideo}」があるかご確認ください。`);
+        showError(`動画【${selectedVideo}】の再生に失敗しました。「店番」フォルダ内にファイルがあるかご確認ください。`);
         playerEl.style.display = 'none';
         isPlaying = false;
         detectionStartTime = null;
@@ -251,16 +261,16 @@
       playerEl.style.display = 'none';
       isPlaying = false;
       
-      // 再生完了時に離脱待ちフラグとカウンターをセット
+      // 動画終了 ➔ 待機フェーズ開始（12秒タイマー起算）
       requireLeaveFirst = true;
-      leaveCount = 0;
+      waitingStartTime = Date.now();
       detectionStartTime = null;
 
       const statusEl = document.getElementById('status');
       const timerEl = document.getElementById('timer');
       statusEl.className = 'status-badge waiting';
-      statusEl.innerText = '⚪ 待機中（次の人を待っています）';
-      timerEl.innerText = '計測: -- 秒';
+      statusEl.innerText = '⚪ 待機中（次の案内まで）';
+      timerEl.innerText = `次まで: ${WAITING_TIMEOUT_SECONDS.toFixed(1)} 秒`;
     };
   }
 
