@@ -103,7 +103,7 @@
 <div id="container">
   <video id="webcam" autoplay playsinline muted></video>
 
-  <!-- 右上ステータス表示（待機中は非表示） -->
+  <!-- 右上ステータス表示 -->
   <div class="overlay-ui" id="overlay-ui">
     <div id="status" class="status-badge searching">⚪ カメラ準備中...</div>
     <div id="timer" class="timer-display">計測: 0.0 秒 / 4.0 秒</div>
@@ -129,6 +129,10 @@
 
 <script>
   const NTFY_TOPIC = "miseban_call_8938";
+
+  // ★ スマホに届く通知の文言（ここをお好きな文章に変更できます）
+  const ALERT_TITLE = "店頭呼び出し";
+  const ALERT_BODY_TEXT = "お客様がお呼びです！売場をご確認ください";
 
   const videoList = Array.from({ length: 10 }, (_, i) => {
     const num = String(i + 1).padStart(2, '0');
@@ -177,7 +181,7 @@
     }
   }
 
-  // 動的iframe/form生成による連続通知対応
+  // ★ 日本語文字化け（記号だらけ）を解消した送信処理
   function sendNtfyAlert() {
     if (isSending) return;
     isSending = true;
@@ -196,15 +200,18 @@
     const now = new Date();
     const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
 
+    // UTF-8を明示的に指定して文字化けを防止
     const form = document.createElement('form');
     form.method = "POST";
     form.action = `https://ntfy.sh/${NTFY_TOPIC}`;
     form.target = uniqueId;
+    form.acceptCharset = "UTF-8";
+    form.enctype = "application/x-www-form-urlencoded";
     form.style.display = "none";
 
     const fields = {
-      title: "店頭呼び出し",
-      message: `お客様が店頭で店主を呼び出しています！（${timeStr}）`,
+      title: ALERT_TITLE,
+      message: `${ALERT_BODY_TEXT}（${timeStr}）`,
       priority: "urgent",
       tags: "bell,warning"
     };
@@ -221,173 +228,4 @@
     form.submit();
 
     callBtn.classList.add("sent");
-    callBtn.innerText = "✅ 店主へ通知しました";
-
-    setTimeout(() => {
-      form.remove();
-      iframe.remove();
-    }, 2000);
-
-    setTimeout(() => {
-      callBtn.classList.remove("sent");
-      callBtn.innerText = "🔔 店主呼び出しはこちら";
-      callBtn.style.pointerEvents = "auto";
-      isSending = false;
-    }, 4000);
-  }
-
-  function detectLoop() {
-    if (!isPlaying && videoEl.videoWidth > 0) {
-      const isPersonDetected = checkPersonPresence();
-      handleDetection(isPersonDetected);
-    }
-
-    setTimeout(detectLoop, 150);
-  }
-
-  // ★ 安定稼働していた元の感度設定に完全復旧
-  function checkPersonPresence() {
-    procCtx.drawImage(videoEl, 0, 0, procCanvas.width, procCanvas.height);
-    const frame = procCtx.getImageData(0, 0, procCanvas.width, procCanvas.height);
-    const data = frame.data;
-    let skinPixels = 0;
-
-    for (let i = 0; i < data.length; i += 8) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-
-      if (r > 60 && g > 30 && b > 15 && r > g && r > b && (r - g > 8)) {
-        skinPixels++;
-      }
-    }
-
-    return skinPixels > 140;
-  }
-
-  function handleDetection(detected) {
-    const statusEl = document.getElementById('status');
-    const timerEl = document.getElementById('timer');
-
-    // ★ 待機フェーズ
-    if (requireLeaveFirst) {
-      overlayUiEl.style.display = 'none'; // 待機中案内は非表示
-
-      const waitingElapsed = (Date.now() - waitingStartTime) / 1000;
-
-      // 30秒経過で次の動画を自動再生
-      if (waitingElapsed >= WAITING_TIMEOUT_SECONDS) {
-        requireLeaveFirst = false;
-        waitingStartTime = null;
-        playRandomVideo();
-        return;
-      }
-
-      // 画面から人が完全に離脱した場合は待機解除
-      if (!detected) {
-        requireLeaveFirst = false;
-        waitingStartTime = null;
-        detectionStartTime = null;
-        overlayUiEl.style.display = 'block';
-        statusEl.className = 'status-badge searching';
-        statusEl.innerText = '⚪ 待機中（人を探しています）';
-        timerEl.innerText = `計測: 0.0 秒 / ${TARGET_SECONDS.toFixed(1)} 秒`;
-        return;
-      }
-
-      return;
-    }
-
-    overlayUiEl.style.display = 'block';
-
-    if (detected) {
-      statusEl.className = 'status-badge detecting';
-      statusEl.innerText = '👤 人物を検知中';
-
-      if (!detectionStartTime) {
-        detectionStartTime = Date.now();
-      }
-
-      const elapsed = (Date.now() - detectionStartTime) / 1000;
-      timerEl.innerText = `計測: ${elapsed.toFixed(1)} 秒 / ${TARGET_SECONDS.toFixed(1)} 秒`;
-
-      if (elapsed >= TARGET_SECONDS) {
-        playRandomVideo();
-      }
-    } else {
-      detectionStartTime = null;
-      statusEl.className = 'status-badge searching';
-      statusEl.innerText = '⚪ 待機中（人を探しています）';
-      timerEl.innerText = `計測: 0.0 秒 / ${TARGET_SECONDS.toFixed(1)} 秒`;
-    }
-  }
-
-  function playRandomVideo() {
-    if (videoList.length === 0) {
-      showError("動画リストが空です。");
-      return;
-    }
-
-    isPlaying = true;
-    detectionStartTime = null;
-    waitingStartTime = null;
-
-    if (callBtnContainer) callBtnContainer.style.display = 'none';
-    if (overlayUiEl) overlayUiEl.style.display = 'none';
-
-    let randomIndex;
-    if (videoList.length > 1) {
-      do {
-        randomIndex = Math.floor(Math.random() * videoList.length);
-      } while (randomIndex === lastPlayedIndex);
-    } else {
-      randomIndex = 0;
-    }
-    
-    lastPlayedIndex = randomIndex;
-    const selectedVideo = videoList[randomIndex];
-
-    hideError();
-    playerEl.src = selectedVideo;
-    playerEl.style.display = 'block';
-    
-    playerEl.load();
-    const playPromise = playerEl.play();
-
-    if (playPromise !== undefined) {
-      playPromise.catch(err => {
-        showError(`動画【${selectedVideo}】の再生に失敗しました。「店番」フォルダ内にファイルがあるかご確認ください。`);
-        playerEl.style.display = 'none';
-        isPlaying = false;
-        detectionStartTime = null;
-        if (callBtnContainer) callBtnContainer.style.display = 'block';
-      });
-    }
-
-    playerEl.onended = () => {
-      playerEl.style.display = 'none';
-      isPlaying = false;
-      
-      if (callBtnContainer) callBtnContainer.style.display = 'block';
-
-      // 待機フェーズ開始（30秒タイマー）
-      requireLeaveFirst = true;
-      waitingStartTime = Date.now();
-      detectionStartTime = null;
-
-      if (overlayUiEl) overlayUiEl.style.display = 'none';
-    };
-  }
-
-  function showError(msg) {
-    const errEl = document.getElementById('error-msg');
-    errEl.innerText = msg;
-    errEl.style.display = 'block';
-  }
-
-  function hideError() {
-    document.getElementById('error-msg').style.display = 'none';
-  }
-</script>
-</body>
-</html>
+    callBtn.innerText = "✅ 店主へ通知しました
