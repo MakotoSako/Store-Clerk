@@ -42,7 +42,6 @@
     .status-badge.searching { color: #9ca3af; }
     .timer-display { font-size: 1rem; color: #facc15; font-family: monospace; }
     
-    /* 店主呼び出し赤ボタン */
     #call-button-container {
       position: absolute;
       bottom: 12%;
@@ -103,13 +102,11 @@
 <div id="container">
   <video id="webcam" autoplay playsinline muted></video>
 
-  <!-- 右上ステータス表示（待機中は自動非表示） -->
   <div class="overlay-ui" id="overlay-ui">
     <div id="status" class="status-badge searching">⚪ カメラ準備中...</div>
     <div id="timer" class="timer-display">計測: 0.0 秒 / 4.0 秒</div>
   </div>
 
-  <!-- 店主呼び出し赤ボタン -->
   <div id="call-button-container">
     <button class="call-btn" id="call-btn" onclick="sendNtfyAlert()">
       🔔 店主呼び出しはこちら
@@ -155,6 +152,7 @@
     callBtn = document.getElementById('call-btn');
     overlayUiEl = document.getElementById('overlay-ui');
 
+    // 負荷軽減のため処理解像度を維持
     procCanvas = document.createElement('canvas');
     procCanvas.width = 160;
     procCanvas.height = 120;
@@ -168,7 +166,9 @@
         audio: false
       });
       videoEl.srcObject = stream;
-      await videoEl.play();
+      
+      // iPadでのawait再生ブロックを回避
+      videoEl.play().catch(e => console.log("Play log:", e));
 
       document.getElementById('status').innerText = '⚪ 待機中（人を探しています）';
       detectLoop();
@@ -177,7 +177,6 @@
     }
   }
 
-  // 複数回確実に送信する動的iframe/form生成
   function sendNtfyAlert() {
     if (isSending) return;
     isSending = true;
@@ -204,4 +203,142 @@
 
     const fields = {
       title: "店頭呼び出し",
-      message:
+      message: `お客様が店頭で店主を呼び出しています！（${timeStr}）`,
+      priority: "urgent",
+      tags: "bell,warning"
+    };
+
+    for (const [key, val] of Object.entries(fields)) {
+      const input = document.createElement('input');
+      input.type = "hidden";
+      input.name = key;
+      input.value = val;
+      form.appendChild(input);
+    }
+
+    document.body.appendChild(form);
+    form.submit();
+
+    callBtn.classList.add("sent");
+    callBtn.innerText = "✅ 店主へ通知しました";
+
+    setTimeout(() => {
+      form.remove();
+      iframe.remove();
+    }, 2000);
+
+    setTimeout(() => {
+      callBtn.classList.remove("sent");
+      callBtn.innerText = "🔔 店主呼び出しはこちら";
+      callBtn.style.pointerEvents = "auto";
+      isSending = false;
+    }, 4000);
+  }
+
+  function detectLoop() {
+    if (!isPlaying && videoEl && videoEl.videoWidth > 0) {
+      const isPersonDetected = checkPersonPresence();
+      handleDetection(isPersonDetected);
+    }
+
+    // iPadの描画ループに負荷をかけないよう200ms間隔
+    setTimeout(detectLoop, 200);
+  }
+
+  // 軽量かつ高感度な人物判定（iPadがフリーズしない設定）
+  function checkPersonPresence() {
+    procCtx.drawImage(videoEl, 0, 0, procCanvas.width, procCanvas.height);
+    const frame = procCtx.getImageData(0, 0, procCanvas.width, procCanvas.height);
+    const data = frame.data;
+    let skinPixels = 0;
+
+    // 負荷を抑えるためステップは8に戻し、色条件と閾値で感度を極大化
+    for (let i = 0; i < data.length; i += 8) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+
+      // 薄暗い場所でもしっかり拾える柔軟な条件
+      if (r > 50 && g > 25 && b > 10 && r > g && r > b && (r - g > 5)) {
+        skinPixels++;
+      }
+    }
+
+    // 閾値を40まで下げて、遠くにいる人や少しの映り込みでも即反応
+    return skinPixels > 40;
+  }
+
+  function handleDetection(detected) {
+    const statusEl = document.getElementById('status');
+    const timerEl = document.getElementById('timer');
+
+    if (requireLeaveFirst) {
+      overlayUiEl.style.display = 'none';
+
+      const waitingElapsed = (Date.now() - waitingStartTime) / 1000;
+
+      if (waitingElapsed >= WAITING_TIMEOUT_SECONDS) {
+        requireLeaveFirst = false;
+        waitingStartTime = null;
+        playRandomVideo();
+        return;
+      }
+
+      if (!detected) {
+        requireLeaveFirst = false;
+        waitingStartTime = null;
+        detectionStartTime = null;
+        overlayUiEl.style.display = 'block';
+        statusEl.className = 'status-badge searching';
+        statusEl.innerText = '⚪ 待機中（人を探しています）';
+        timerEl.innerText = `計測: 0.0 秒 / ${TARGET_SECONDS.toFixed(1)} 秒`;
+        return;
+      }
+
+      return;
+    }
+
+    overlayUiEl.style.display = 'block';
+
+    if (detected) {
+      statusEl.className = 'status-badge detecting';
+      statusEl.innerText = '👤 人物を検知中';
+
+      if (!detectionStartTime) {
+        detectionStartTime = Date.now();
+      }
+
+      const elapsed = (Date.now() - detectionStartTime) / 1000;
+      timerEl.innerText = `計測: ${elapsed.toFixed(1)} 秒 / ${TARGET_SECONDS.toFixed(1)} 秒`;
+
+      if (elapsed >= TARGET_SECONDS) {
+        playRandomVideo();
+      }
+    } else {
+      detectionStartTime = null;
+      statusEl.className = 'status-badge searching';
+      statusEl.innerText = '⚪ 待機中（人を探しています）';
+      timerEl.innerText = `計測: 0.0 秒 / ${TARGET_SECONDS.toFixed(1)} 秒`;
+    }
+  }
+
+  function playRandomVideo() {
+    if (videoList.length === 0) {
+      showError("動画リストが空です。");
+      return;
+    }
+
+    isPlaying = true;
+    detectionStartTime = null;
+    waitingStartTime = null;
+
+    if (callBtnContainer) callBtnContainer.style.display = 'none';
+    if (overlayUiEl) overlayUiEl.style.display = 'none';
+
+    let randomIndex;
+    if (videoList.length > 1) {
+      do {
+        randomIndex = Math.floor(Math.random() * videoList.length);
+      } while (randomIndex === lastPlayedIndex);
+    } else {
+      randomIndex = 0;
