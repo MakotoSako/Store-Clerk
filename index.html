@@ -43,7 +43,7 @@
     .status-badge.waiting { color: #f97316; }
     .timer-display { font-size: 1rem; color: #facc15; font-family: monospace; }
     
-    /* 画面中央の店主呼び出し赤ボタン */
+    /* 店主呼び出し赤ボタン */
     #call-button-container {
       position: absolute;
       bottom: 12%;
@@ -65,13 +65,17 @@
       display: inline-flex;
       align-items: center;
       gap: 12px;
-      text-decoration: none;
-      transition: transform 0.1s ease, box-shadow 0.1s ease;
+      user-select: none;
       -webkit-tap-highlight-color: transparent;
+      transition: transform 0.1s ease, box-shadow 0.1s ease;
     }
     .call-btn:active {
       transform: scale(0.95);
       box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+    }
+    .call-btn.sent {
+      background: #10b981;
+      border-color: #a7f3d0;
     }
 
     #error-msg {
@@ -107,9 +111,9 @@
 
   <!-- 店主呼び出し赤ボタン -->
   <div id="call-button-container">
-    <a href="sms:09071648938&body=呼び出しです" class="call-btn" id="call-btn">
+    <button class="call-btn" id="call-btn" onclick="sendNtfyAlert()">
       🔔 店主呼び出しはこちら
-    </a>
+    </button>
   </div>
 
   <div id="error-msg"></div>
@@ -124,27 +128,32 @@
 </div>
 
 <script>
+  // ★ アンダーバー版のトピック名に変更済み
+  const NTFY_TOPIC = "miseban_call_8938";
+
   const videoList = Array.from({ length: 10 }, (_, i) => {
     const num = String(i + 1).padStart(2, '0');
     return `${num}.mp4`;
   });
 
-  const TARGET_SECONDS = 4.0;           // 検知から再生までの時間（4秒）
-  const WAITING_TIMEOUT_SECONDS = 30.0; // ★ 待機から次へ進む強制リミット（30秒に変更）
+  const TARGET_SECONDS = 4.0;
+  const WAITING_TIMEOUT_SECONDS = 30.0;
 
-  let videoEl, playerEl, callBtnContainer;
+  let videoEl, playerEl, callBtnContainer, callBtn;
   let detectionStartTime = null;
   let waitingStartTime = null;
   let isPlaying = false;
   let requireLeaveFirst = false;
   let lastPlayedIndex = -1;
   let procCanvas, procCtx;
+  let isSending = false;
 
   async function startSystem() {
     document.getElementById('start-screen').style.display = 'none';
     videoEl = document.getElementById('webcam');
     playerEl = document.getElementById('video-player');
     callBtnContainer = document.getElementById('call-button-container');
+    callBtn = document.getElementById('call-btn');
 
     procCanvas = document.createElement('canvas');
     procCanvas.width = 160;
@@ -166,6 +175,43 @@
     } catch (err) {
       showError("カメラの起動に失敗しました: " + err);
     }
+  }
+
+  // ★ ntfy.sh プッシュ通知送信処理
+  async function sendNtfyAlert() {
+    if (isSending) return;
+    isSending = true;
+
+    callBtn.innerText = "⏳ 呼び出し中...";
+    callBtn.style.pointerEvents = "none";
+
+    try {
+      const res = await fetch(`https://ntfy.sh/${NTFY_TOPIC}`, {
+        method: "POST",
+        headers: {
+          "Title": "店頭呼び出し",
+          "Priority": "urgent",
+          "Tags": "bell,warning"
+        },
+        body: "お客様が店頭で店主を呼び出しています！"
+      });
+
+      if (res.ok) {
+        callBtn.classList.add("sent");
+        callBtn.innerText = "✅ 店主へ通知しました";
+      } else {
+        throw new Error("HTTP " + res.status);
+      }
+    } catch (e) {
+      callBtn.innerText = "⚠️ 送信失敗（電波確認）";
+    }
+
+    setTimeout(() => {
+      callBtn.classList.remove("sent");
+      callBtn.innerText = "🔔 店主呼び出しはこちら";
+      callBtn.style.pointerEvents = "auto";
+      isSending = false;
+    }, 5000);
   }
 
   function detectLoop() {
@@ -200,11 +246,10 @@
     const statusEl = document.getElementById('status');
     const timerEl = document.getElementById('timer');
 
-    // 再生後の待機フェーズ
     if (requireLeaveFirst) {
       const waitingElapsed = (Date.now() - waitingStartTime) / 1000;
 
-      // 30秒経過した場合は強制的に次の動画へ
+      // 30秒経過で強制次再生
       if (waitingElapsed >= WAITING_TIMEOUT_SECONDS) {
         requireLeaveFirst = false;
         waitingStartTime = null;
@@ -212,7 +257,6 @@
         return;
       }
 
-      // 画面から人が完全に離脱した場合は即時リセット
       if (!detected) {
         requireLeaveFirst = false;
         waitingStartTime = null;
@@ -230,7 +274,6 @@
       return;
     }
 
-    // 通常モード（4秒検知）
     if (detected) {
       statusEl.className = 'status-badge detecting';
       statusEl.innerText = '👤 人物を検知中';
@@ -263,7 +306,6 @@
     detectionStartTime = null;
     waitingStartTime = null;
 
-    // 動画再生中は呼び出しボタンを隠す（動画が見やすいように配慮）
     if (callBtnContainer) callBtnContainer.style.display = 'none';
 
     let randomIndex;
@@ -299,10 +341,8 @@
       playerEl.style.display = 'none';
       isPlaying = false;
       
-      // 動画終了時に呼び出しボタンを再表示
       if (callBtnContainer) callBtnContainer.style.display = 'block';
 
-      // 待機フェーズ開始（30秒タイマー）
       requireLeaveFirst = true;
       waitingStartTime = Date.now();
       detectionStartTime = null;
